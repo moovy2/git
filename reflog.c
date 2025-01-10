@@ -1,9 +1,14 @@
-#include "cache.h"
-#include "object-store.h"
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
+#include "gettext.h"
+#include "object-store-ll.h"
 #include "reflog.h"
 #include "refs.h"
 #include "revision.h"
-#include "worktree.h"
+#include "tree.h"
+#include "tree-walk.h"
 
 /* Remember to update object flag allocation in object.h */
 #define INCOMPLETE	(1u<<10)
@@ -28,7 +33,8 @@ static int tree_is_complete(const struct object_id *oid)
 	if (!tree->buffer) {
 		enum object_type type;
 		unsigned long size;
-		void *data = read_object_file(oid, &type, &size);
+		void *data = repo_read_object_file(the_repository, oid, &type,
+						   &size);
 		if (!data) {
 			tree->object.flags |= INCOMPLETE;
 			return 0;
@@ -36,10 +42,10 @@ static int tree_is_complete(const struct object_id *oid)
 		tree->buffer = data;
 		tree->size = size;
 	}
-	init_tree_desc(&desc, tree->buffer, tree->size);
+	init_tree_desc(&desc, &tree->object.oid, tree->buffer, tree->size);
 	complete = 1;
 	while (tree_entry(&desc, &entry)) {
-		if (!has_object_file(&entry.oid) ||
+		if (!repo_has_object_file(the_repository, &entry.oid) ||
 		    (S_ISDIR(entry.mode) && !tree_is_complete(&entry.oid))) {
 			tree->object.flags |= INCOMPLETE;
 			complete = 0;
@@ -186,14 +192,13 @@ static void mark_reachable(struct expire_reflog_policy_cb *cb)
 		struct commit *commit = pop_commit(&pending);
 		if (commit->object.flags & REACHABLE)
 			continue;
-		if (parse_commit(commit))
+		if (repo_parse_commit(the_repository, commit))
 			continue;
 		commit->object.flags |= REACHABLE;
 		if (commit->date < expire_limit) {
 			commit_list_insert(commit, &leftover);
 			continue;
 		}
-		commit->object.flags |= REACHABLE;
 		parent = commit->parents;
 		while (parent) {
 			commit = parent->item;
@@ -206,7 +211,7 @@ static void mark_reachable(struct expire_reflog_policy_cb *cb)
 	cb->mark_list = leftover;
 }
 
-static int unreachable(struct expire_reflog_policy_cb *cb, struct commit *commit, struct object_id *oid)
+static int is_unreachable(struct expire_reflog_policy_cb *cb, struct commit *commit, struct object_id *oid)
 {
 	/*
 	 * We may or may not have the commit yet - if not, look it
@@ -261,7 +266,7 @@ int should_expire_reflog_ent(struct object_id *ooid, struct object_id *noid,
 			return 1;
 		case UE_NORMAL:
 		case UE_HEAD:
-			if (unreachable(cb, old_commit, ooid) || unreachable(cb, new_commit, noid))
+			if (is_unreachable(cb, old_commit, ooid) || is_unreachable(cb, new_commit, noid))
 				return 1;
 			break;
 		}
@@ -296,6 +301,7 @@ int should_expire_reflog_ent_verbose(struct object_id *ooid,
 }
 
 static int push_tip_to_list(const char *refname UNUSED,
+			    const char *referent UNUSED,
 			    const struct object_id *oid,
 			    int flags, void *cb_data)
 {
@@ -328,7 +334,8 @@ void reflog_expiry_prepare(const char *refname,
 	if (!cb->cmd.expire_unreachable || is_head(refname)) {
 		cb->unreachable_expire_kind = UE_HEAD;
 	} else {
-		commit = lookup_commit(the_repository, oid);
+		commit = lookup_commit_reference_gently(the_repository,
+							oid, 1);
 		if (commit && is_null_oid(&commit->object.oid))
 			commit = NULL;
 		cb->unreachable_expire_kind = commit ? UE_NORMAL : UE_ALWAYS;
@@ -341,7 +348,8 @@ void reflog_expiry_prepare(const char *refname,
 	case UE_ALWAYS:
 		return;
 	case UE_HEAD:
-		for_each_ref(push_tip_to_list, &cb->tips);
+		refs_for_each_ref(get_main_ref_store(the_repository),
+				  push_tip_to_list, &cb->tips);
 		for (elem = cb->tips; elem; elem = elem->next)
 			commit_list_insert(elem->item, &cb->mark_list);
 		break;
@@ -371,6 +379,9 @@ void reflog_expiry_cleanup(void *cb_data)
 		clear_commit_marks(cb->tip_commit, REACHABLE);
 		break;
 	}
+	for (elem = cb->mark_list; elem; elem = elem->next)
+		clear_commit_marks(elem->item, REACHABLE);
+	free_commit_list(cb->mark_list);
 }
 
 int count_reflog_ent(struct object_id *ooid UNUSED,
@@ -403,7 +414,7 @@ int reflog_delete(const char *rev, enum expire_reflog_flags flags, int verbose)
 	if (!spec)
 		return error(_("not a reflog: %s"), rev);
 
-	if (!dwim_log(rev, spec - rev, NULL, &ref)) {
+	if (!repo_dwim_log(the_repository, rev, spec - rev, NULL, &ref)) {
 		status |= error(_("no reflog for '%s'"), rev);
 		goto cleanup;
 	}
@@ -411,19 +422,22 @@ int reflog_delete(const char *rev, enum expire_reflog_flags flags, int verbose)
 	recno = strtoul(spec + 2, &ep, 10);
 	if (*ep == '}') {
 		cmd.recno = -recno;
-		for_each_reflog_ent(ref, count_reflog_ent, &cmd);
+		refs_for_each_reflog_ent(get_main_ref_store(the_repository),
+					 ref, count_reflog_ent, &cmd);
 	} else {
 		cmd.expire_total = approxidate(spec + 2);
-		for_each_reflog_ent(ref, count_reflog_ent, &cmd);
+		refs_for_each_reflog_ent(get_main_ref_store(the_repository),
+					 ref, count_reflog_ent, &cmd);
 		cmd.expire_total = 0;
 	}
 
 	cb.cmd = cmd;
-	status |= reflog_expire(ref, flags,
-				reflog_expiry_prepare,
-				should_prune_fn,
-				reflog_expiry_cleanup,
-				&cb);
+	status |= refs_reflog_expire(get_main_ref_store(the_repository), ref,
+				     flags,
+				     reflog_expiry_prepare,
+				     should_prune_fn,
+				     reflog_expiry_cleanup,
+				     &cb);
 
  cleanup:
 	free(ref);
