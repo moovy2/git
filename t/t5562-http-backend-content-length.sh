@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='test git-http-backend respects CONTENT_LENGTH'
+
 . ./test-lib.sh
 
 test_lazy_prereq GZIP 'gzip --version'

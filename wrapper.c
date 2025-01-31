@@ -1,16 +1,20 @@
 /*
  * Various trivial helper wrappers around standard functions
  */
-#include "cache.h"
-#include "config.h"
 
-static intmax_t count_fsync_writeout_only;
-static intmax_t count_fsync_hardware_flush;
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "git-compat-util.h"
+#include "abspath.h"
+#include "parse.h"
+#include "gettext.h"
+#include "strbuf.h"
+#include "trace2.h"
 
 #ifdef HAVE_RTLGENRANDOM
 /* This is required to get access to RtlGenRandom. */
 #define SystemFunction036 NTAPI SystemFunction036
-#include <NTSecAPI.h>
+#include <ntsecapi.h>
 #undef SystemFunction036
 #endif
 
@@ -475,7 +479,7 @@ int git_mkstemps_mode(char *pattern, int suffix_len, int mode)
 	for (count = 0; count < TMP_MAX; ++count) {
 		int i;
 		uint64_t v;
-		if (csprng_bytes(&v, sizeof(v)) < 0)
+		if (csprng_bytes(&v, sizeof(v), 0) < 0)
 			return error_errno("unable to get random bytes for temporary file");
 
 		/* Fill in the random bits. */
@@ -545,7 +549,7 @@ int git_fsync(int fd, enum fsync_action action)
 {
 	switch (action) {
 	case FSYNC_WRITEOUT_ONLY:
-		count_fsync_writeout_only += 1;
+		trace2_counter_add(TRACE2_COUNTER_ID_FSYNC_WRITEOUT_ONLY, 1);
 
 #ifdef __APPLE__
 		/*
@@ -577,7 +581,7 @@ int git_fsync(int fd, enum fsync_action action)
 		return -1;
 
 	case FSYNC_HARDWARE_FLUSH:
-		count_fsync_hardware_flush += 1;
+		trace2_counter_add(TRACE2_COUNTER_ID_FSYNC_HARDWARE_FLUSH, 1);
 
 		/*
 		 * On macOS, a special fcntl is required to really flush the
@@ -592,18 +596,6 @@ int git_fsync(int fd, enum fsync_action action)
 	default:
 		BUG("unexpected git_fsync(%d) call", action);
 	}
-}
-
-static void log_trace_fsync_if(const char *key, intmax_t value)
-{
-	if (value)
-		trace2_data_intmax("fsync", the_repository, key, value);
-}
-
-void trace_git_fsync_stats(void)
-{
-	log_trace_fsync_if("fsync/writeout-only", count_fsync_writeout_only);
-	log_trace_fsync_if("fsync/hardware-flush", count_fsync_hardware_flush);
 }
 
 static int warn_if_unremovable(const char *op, const char *file, int rc)
@@ -639,11 +631,6 @@ int unlink_or_warn(const char *file)
 int rmdir_or_warn(const char *file)
 {
 	return warn_if_unremovable("rmdir", file, rmdir(file));
-}
-
-int remove_or_warn(unsigned int mode, const char *file)
-{
-	return S_ISGITLINK(mode) ? rmdir_or_warn(file) : unlink_or_warn(file);
 }
 
 static int access_error_is_ok(int err, unsigned flag)
@@ -686,7 +673,7 @@ int xsnprintf(char *dst, size_t max, const char *fmt, ...)
 	va_end(ap);
 
 	if (len < 0)
-		BUG("your snprintf is broken");
+		die(_("unable to format message: %s"), fmt);
 	if (len >= max)
 		BUG("attempt to snprintf into too-small buffer");
 	return len;
@@ -763,7 +750,7 @@ int open_nofollow(const char *path, int flags)
 #endif
 }
 
-int csprng_bytes(void *buf, size_t len)
+int csprng_bytes(void *buf, size_t len, MAYBE_UNUSED unsigned flags)
 {
 #if defined(HAVE_ARC4RANDOM) || defined(HAVE_ARC4RANDOM_LIBBSD)
 	/* This function never returns an error. */
@@ -798,14 +785,18 @@ int csprng_bytes(void *buf, size_t len)
 		return -1;
 	return 0;
 #elif defined(HAVE_OPENSSL_CSPRNG)
-	int res = RAND_bytes(buf, len);
-	if (res == 1)
+	switch (RAND_pseudo_bytes(buf, len)) {
+	case 1:
 		return 0;
-	if (res == -1)
-		errno = ENOTSUP;
-	else
+	case 0:
+		if (flags & CSPRNG_BYTES_INSECURE)
+			return 0;
 		errno = EIO;
-	return -1;
+		return -1;
+	default:
+		errno = ENOTSUP;
+		return -1;
+	}
 #else
 	ssize_t res;
 	char *p = buf;
@@ -827,4 +818,14 @@ int csprng_bytes(void *buf, size_t len)
 	close(fd);
 	return 0;
 #endif
+}
+
+uint32_t git_rand(unsigned flags)
+{
+	uint32_t result;
+
+	if (csprng_bytes(&result, sizeof(result), flags) < 0)
+		die(_("unable to get random bytes"));
+
+	return result;
 }

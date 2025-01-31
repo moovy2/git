@@ -2,7 +2,6 @@
 
 test_description='git mktree'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -60,11 +59,11 @@ test_expect_success 'allow missing object with --missing' '
 '
 
 test_expect_success 'mktree refuses to read ls-tree -r output (1)' '
-	test_must_fail git mktree <all >actual
+	test_must_fail git mktree <all
 '
 
 test_expect_success 'mktree refuses to read ls-tree -r output (2)' '
-	test_must_fail git mktree <all.withsub >actual
+	test_must_fail git mktree <all.withsub
 '
 
 test_done

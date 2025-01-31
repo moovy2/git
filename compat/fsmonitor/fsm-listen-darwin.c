@@ -1,4 +1,5 @@
 #ifndef __clang__
+#include <dispatch/dispatch.h>
 #include "fsm-darwin-gcc.h"
 #else
 #include <CoreFoundation/CoreFoundation.h>
@@ -22,11 +23,15 @@
 #endif
 #endif
 
-#include "cache.h"
-#include "fsmonitor.h"
+#include "git-compat-util.h"
+#include "fsmonitor-ll.h"
 #include "fsm-listen.h"
 #include "fsmonitor--daemon.h"
 #include "fsmonitor-path-utils.h"
+#include "gettext.h"
+#include "simple-ipc.h"
+#include "string-list.h"
+#include "trace.h"
 
 struct fsm_listen_data
 {
@@ -38,7 +43,9 @@ struct fsm_listen_data
 
 	FSEventStreamRef stream;
 
-	CFRunLoopRef rl;
+	dispatch_queue_t dq;
+	pthread_cond_t dq_finished;
+	pthread_mutex_t dq_lock;
 
 	enum shutdown_style {
 		SHUTDOWN_EVENT = 0,
@@ -185,12 +192,12 @@ static void my_add_path(struct fsmonitor_batch *batch, const char *path)
 }
 
 
-static void fsevent_callback(ConstFSEventStreamRef streamRef,
+static void fsevent_callback(ConstFSEventStreamRef streamRef UNUSED,
 			     void *ctx,
 			     size_t num_of_events,
 			     void *event_paths,
 			     const FSEventStreamEventFlags event_flags[],
-			     const FSEventStreamEventId event_ids[])
+			     const FSEventStreamEventId event_ids[] UNUSED)
 {
 	struct fsmonitor_daemon_state *state = ctx;
 	struct fsm_listen_data *data = state->listen_data;
@@ -201,13 +208,12 @@ static void fsevent_callback(ConstFSEventStreamRef streamRef,
 	const char *slash;
 	char *resolved = NULL;
 	struct strbuf tmp = STRBUF_INIT;
-	int k;
 
 	/*
 	 * Build a list of all filesystem changes into a private/local
 	 * list and without holding any locks.
 	 */
-	for (k = 0; k < num_of_events; k++) {
+	for (size_t k = 0; k < num_of_events; k++) {
 		/*
 		 * On Mac, we receive an array of absolute paths.
 		 */
@@ -379,8 +385,11 @@ force_shutdown:
 	fsmonitor_batch__free_list(batch);
 	string_list_clear(&cookie_list, 0);
 
+	pthread_mutex_lock(&data->dq_lock);
 	data->shutdown_style = FORCE_SHUTDOWN;
-	CFRunLoopStop(data->rl);
+	pthread_cond_broadcast(&data->dq_finished);
+	pthread_mutex_unlock(&data->dq_lock);
+
 	strbuf_release(&tmp);
 	return;
 }
@@ -441,10 +450,6 @@ int fsm_listen__ctor(struct fsmonitor_daemon_state *state)
 	if (!data->stream)
 		goto failed;
 
-	/*
-	 * `data->rl` needs to be set inside the listener thread.
-	 */
-
 	return 0;
 
 failed:
@@ -471,6 +476,11 @@ void fsm_listen__dtor(struct fsmonitor_daemon_state *state)
 		FSEventStreamRelease(data->stream);
 	}
 
+	if (data->dq)
+		dispatch_release(data->dq);
+	pthread_cond_destroy(&data->dq_finished);
+	pthread_mutex_destroy(&data->dq_lock);
+
 	FREE_AND_NULL(state->listen_data);
 }
 
@@ -479,9 +489,11 @@ void fsm_listen__stop_async(struct fsmonitor_daemon_state *state)
 	struct fsm_listen_data *data;
 
 	data = state->listen_data;
-	data->shutdown_style = SHUTDOWN_EVENT;
 
-	CFRunLoopStop(data->rl);
+	pthread_mutex_lock(&data->dq_lock);
+	data->shutdown_style = SHUTDOWN_EVENT;
+	pthread_cond_broadcast(&data->dq_finished);
+	pthread_mutex_unlock(&data->dq_lock);
 }
 
 void fsm_listen__loop(struct fsmonitor_daemon_state *state)
@@ -490,9 +502,11 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 
 	data = state->listen_data;
 
-	data->rl = CFRunLoopGetCurrent();
+	pthread_mutex_init(&data->dq_lock, NULL);
+	pthread_cond_init(&data->dq_finished, NULL);
+	data->dq = dispatch_queue_create("FSMonitor", NULL);
 
-	FSEventStreamScheduleWithRunLoop(data->stream, data->rl, kCFRunLoopDefaultMode);
+	FSEventStreamSetDispatchQueue(data->stream, data->dq);
 	data->stream_scheduled = 1;
 
 	if (!FSEventStreamStart(data->stream)) {
@@ -501,7 +515,15 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	}
 	data->stream_started = 1;
 
-	CFRunLoopRun();
+	/*
+	 * Our fs event listener is now running, so it's safe to start
+	 * serving client requests.
+	 */
+	ipc_server_start_async(state->ipc_server_data);
+
+	pthread_mutex_lock(&data->dq_lock);
+	pthread_cond_wait(&data->dq_finished, &data->dq_lock);
+	pthread_mutex_unlock(&data->dq_lock);
 
 	switch (data->shutdown_style) {
 	case FORCE_ERROR_STOP:

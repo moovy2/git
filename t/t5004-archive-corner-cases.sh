@@ -1,6 +1,7 @@
 #!/bin/sh
 
 test_description='test corner cases of git-archive'
+
 . ./test-lib.sh
 
 # the 10knuls.tar file is used to test for an empty git generated tar
