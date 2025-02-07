@@ -13,6 +13,8 @@ diff.guitool::
 	and requires that a corresponding difftool.<guitool>.cmd variable
 	is defined.
 
+include::{build_dir}/mergetools-diff.txt[]
+
 difftool.<tool>.cmd::
 	Specify the command to invoke the specified diff tool.
 	The specified command is evaluated in shell with the following
@@ -34,3 +36,10 @@ See the `--trust-exit-code` option in linkgit:git-difftool[1] for more details.
 
 difftool.prompt::
 	Prompt before each invocation of the diff tool.
+
+difftool.guiDefault::
+	Set `true` to use the `diff.guitool` by default (equivalent to specifying
+	the `--gui` argument), or `auto` to select `diff.guitool` or `diff.tool`
+	depending on the presence of a `DISPLAY` environment variable value. The
+	default is `false`, where the `--gui` argument must be provided
+	explicitly for the `diff.guitool` to be used.

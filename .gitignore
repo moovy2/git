@@ -9,19 +9,17 @@
 /GIT-PYTHON-VARS
 /GIT-SCRIPT-DEFINES
 /GIT-SPATCH-DEFINES
+/GIT-TEST-SUITES
 /GIT-USER-AGENT
 /GIT-VERSION-FILE
-/bin-wrappers/
 /git
 /git-add
-/git-add--interactive
 /git-am
 /git-annotate
 /git-apply
 /git-archimport
 /git-archive
 /git-bisect
-/git-bisect--helper
 /git-blame
 /git-branch
 /git-bugreport
@@ -60,7 +58,6 @@
 /git-difftool
 /git-difftool--helper
 /git-describe
-/git-env--helper
 /git-fast-export
 /git-fast-import
 /git-fetch
@@ -129,6 +126,7 @@
 /git-rebase
 /git-receive-pack
 /git-reflog
+/git-refs
 /git-remote
 /git-remote-http
 /git-remote-https
@@ -138,6 +136,7 @@
 /git-remote-ext
 /git-repack
 /git-replace
+/git-replay
 /git-request-pull
 /git-rerere
 /git-reset
@@ -195,9 +194,11 @@
 /config-list.h
 /command-list.h
 /hook-list.h
+/version-def.h
 *.tar.gz
 *.dsc
 *.deb
+/git.rc
 /git.spec
 *.exe
 *.[aos]
@@ -225,6 +226,7 @@
 /TAGS
 /cscope*
 /compile_commands.json
+/.cache/
 *.hcc
 *.obj
 *.lib
